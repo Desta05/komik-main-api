@@ -20,39 +20,62 @@ router.get("/manga/popular", async (_req: Request, res: Response) => {
 
 router.get("/manga/page/:pagenumber", async (req: Request, res: Response) => {
   let pagenumber = req.params.pagenumber;
-  let path =
-    pagenumber === "1"
-      ? "/manga/"
-      : `/manga/page/${pagenumber}/`;
-  let url = baseApi + path;
+
+  // KITA UBAH SEMENTARA: Langsung tembak halaman depan webnya
+  let url = "https://mangaku.guru/";
 
   try {
     const response = await AxiosService(url);
     if (response.status === 200) {
       const $ = cheerio.load(response.data as string);
-      const element = $(".bge");
+
+      // Cek elemen apa saja yang tersedia di halaman tersebut
+      console.log("Struktur Kelas yang ada di halaman ini: ");
+      $("[class]").each((i, el) => {
+        console.log($(el).attr("class"));
+      });
+
+      const element = $(".mk-card");
+
+      // MATA-MATA: Kita cetak di terminal berapa banyak elemen yang ditangkap
+      console.log("Mencari di URL: ", url);
+      console.log("Jumlah komik ditemukan: ", element.length);
+      console.log("HTML Body Preview: ", $.html().substring(0, 500));
+      console.log("Apakah #Sinopsis ketemu?", $("#Sinopsis").length);
+      console.log("Apakah #Daftar_Chapter ketemu?", $("#Daftar_Chapter").length);
+
       let manga_list: MangaListItem[] = [];
       let title: string, type: string, updated_on: string, endpoint: string, thumb: string, chapter: string;
 
       element.each((_idx, el) => {
-        console.log(1);
-        title = $(el).find(".kan > a").find("h3").text().trim();
-        endpoint = $(el).find("a").attr("href")?.replace(replaceMangaPage, "") ?? "";
-        type = $(el).find(".bgei > a").find(".tpe1_inf > b").text();
-        updated_on = $(el).find(".kan > .judul2").text().split("|")[1]?.trim() ?? "";
-        thumb = $(el).find(".bgei > a").find("img").attr("src") ?? "";
+        endpoint = $(el).attr("href")?.replace(replaceMangaPage, "") ?? "";
+
+        // PERHATIKAN: Sekarang menggunakan dua garis bawah (__)
+        title = $(el).find(".mk-card__title").text().trim();
+        thumb = $(el).find(".mk-card__cover img").attr("src") ?? "";
+        type = $(el).find(".mk-badge--tipe").text().trim();
         chapter = $(el)
-          .find("div.kan > div:nth-child(5) > a > span:nth-child(2)")
-          .text();
-        manga_list.push({
-          title,
-          thumb,
-          type,
-          updated_on,
-          endpoint,
-          chapter,
-        });
+          .find(".mk-card__meta")
+          .contents()
+          .map((i, child) => $(child).text().trim())
+          .get()
+          .filter(Boolean)
+          .join(" ");
+
+        updated_on = "";
+
+        if (title !== "") {
+          manga_list.push({
+            title,
+            thumb,
+            type,
+            updated_on,
+            endpoint,
+            chapter,
+          });
+        }
       });
+      // ... (lanjutan return res.status(200)...)
       return res.status(200).json({
         status: true,
         message: "success",
@@ -77,61 +100,102 @@ router.get("/manga/detail/:slug", async (req: Request, res: Response) => {
   const slug = req.params.slug;
 
   try {
-    const response = await AxiosService(`/manga/${slug}`);
+    const response = await AxiosService(`/komik/${slug}`);
     const $ = cheerio.load(response.data as string);
-    const element = $(".perapih");
-    let genre_list: { genre_name: string }[] = [];
-    let chapter: { chapter_title: string; chapter_endpoint: string }[] = [];
-    const obj: Record<string, any> = {};
 
-    const getMeta = element.find(".inftable > tbody").first();
-    obj.title = $("#Judul > h1").text().trim();
-    obj.type = $("tr:nth-child(2) > td:nth-child(2)").find("b").text();
-    obj.author = $("#Informasi > table > tbody > tr:nth-child(4) > td:nth-child(2)")
-      .text()
-      .trim();
-    obj.status = $(getMeta).children().eq(4).find("td:nth-child(2)").text();
+    let obj: Record<string, any> = {};
 
-    obj.manga_endpoint = slug;
+    // 1. Ambil Judul & Gambar
+    const article = $("article.mk-series");
+    obj.title = article.attr("data-series-title");
+    obj.thumb = article.attr("data-series-cover");
 
-    obj.thumb = element.find(".ims > img").attr("src");
+    // 2. Ambil Sinopsis
+    obj.synopsis = $("#Sinopsis .mk-prose p").text().trim();
 
-    element.find(".genre > li").each((_idx, el) => {
-      let genre_name = $(el).find("a").text().trim();
-      genre_list.push({
-        genre_name,
-      });
+    // 3. Ambil Daftar Chapter
+    let chapter_list: { chapter_title: string; chapter_endpoint: string }[] = [];
+
+    $("#Chapter_List a").each((_index, el) => {
+      let chapter_title = $(el)
+        .contents()
+        .map((i, child) => $(child).text().trim())
+        .get()
+        .filter(Boolean)
+        .join(" | ");
+
+      let chapter_endpoint = $(el).attr("href");
+
+      if (chapter_endpoint) {
+        // BUNGKUS URL ASLI: Mengubah URL menjadi Base64 agar aman dibawa oleh Flutter
+        let encodedEndpoint = Buffer.from(chapter_endpoint).toString('base64url');
+
+        chapter_list.push({
+          chapter_title,
+          chapter_endpoint: encodedEndpoint,
+        });
+      }
     });
+    obj.chapter = chapter_list;
 
-    obj.genre_list = genre_list || [];
+    // 4. Ambil Data Ekstra (Genre, Status, Rating, Views)
+    let genres: string[] = [];
+    $(".mgen a, .seriestugenre a, .infox .genre a, .mk-series__genres a").each((_idx, el) => {
+      let genreName = $(el).text().trim();
+      if (genreName) genres.push(genreName);
+    });
+    obj.genres = genres;
 
-    const getSinopsis = element.find("#Sinopsis").first();
-    obj.synopsis = $(getSinopsis).find("p").text().trim();
+    let status = $(".imptdt:contains('Status') i, .tsinfo .status, .infox .status").first().text().trim();
+    if (!status) {
+      const statusText = $(".spe span:contains('Status'), .infox .fmed:contains('Status')").first().text();
+      status = statusText.replace("Status:", "").trim();
+    }
+    if (!status) status = $(".mk-series__eyebrow-link").text().trim();
+    obj.status = status || "Unknown";
 
-    $("#Daftar_Chapter > tbody")
-      .find("tr")
-      .each((_index, el) => {
-        let chapter_title = $(el).find("a").text().trim();
-        let chapter_endpoint = $(el).find("a").attr("href");
-        if (chapter_endpoint !== undefined) {
-          const rep = chapter_endpoint.replace("/ch/", "");
-          chapter.push({
-            chapter_title,
-            chapter_endpoint: rep,
-          });
-        }
-        obj.chapter = chapter;
-      });
+    let rating = $(".rating .num, .num[itemprop='ratingValue'], .rtg .num").first().text().trim();
+    obj.rating = rating || "N/A";
+
+    let views = "";
+    $(".ts-views.count, .imptdt:contains('Views') i, .imptdt:contains('Dilihat') i").each((_idx, el) => {
+      views = $(el).text().trim();
+    });
+    obj.views = views || "-";
+
+    // 5. Tambahan Author, Artist, Type
+    let author = $(".imptdt:contains('Author') i, .tsinfo .author, .infox .author").first().text().trim();
+    if (!author) {
+      const authorText = $(".spe span:contains('Pengarang'), .spe span:contains('Author'), .infox .fmed:contains('Author')").first().text();
+      author = authorText.replace(/Pengarang:|Author:/i, "").trim();
+    }
+    if (!author) author = $(".mk-series__author strong").text().trim();
+    obj.author = author || "Unknown";
+
+    let artist = $(".imptdt:contains('Artist') i, .tsinfo .artist, .infox .artist").first().text().trim();
+    if (!artist) {
+      const artistText = $(".spe span:contains('Artis'), .spe span:contains('Artist'), .infox .fmed:contains('Artist')").first().text();
+      artist = artistText.replace(/Artis:|Artist:/i, "").trim();
+    }
+    if (!artist) artist = $(".mk-series__author strong").text().trim(); // Fallback ke author jika tidak ada
+    obj.artist = artist || "Unknown";
+
+    let type = $(".imptdt:contains('Type') i, .imptdt:contains('Tipe') i, .tsinfo .type, .infox .type").first().text().trim();
+    if (!type) {
+      const typeText = $(".spe span:contains('Tipe'), .spe span:contains('Type'), .infox .fmed:contains('Type')").first().text();
+      type = typeText.replace(/Tipe:|Type:/i, "").trim();
+    }
+    if (!type) type = $(".mk-series__eyebrow-tipe").text().replace(/[^a-zA-Z]/g, "").trim();
+    obj.type = type || "Unknown";
 
     res.status(200).send(obj);
   } catch (error) {
     console.log(error);
-    res.send({
-      status: false,
-      message: error,
-    });
+    res.status(500).send({ status: false, message: "Gagal mengambil detail" });
   }
 });
+
+
 
 router.get("/search/", async (req: Request, res: Response) => {
   const query = req.query.q as string;
@@ -396,5 +460,231 @@ const getManhuaManhwa = async (req: Request, res: Response, type: string) => {
     });
   }
 };
+
+router.get("/manga/chapter/:endpoint", async (req: Request, res: Response) => {
+  const endpoint = req.params.endpoint;
+
+  try {
+    // BUKA BUNGKUSAN: Mengembalikan teks Base64 menjadi URL aslinya
+    const targetUrl = Buffer.from(String(endpoint), 'base64url').toString('utf8');
+    console.log(`\n[+] Membuka URL Asli: ${targetUrl}`);
+
+    // Langsung tembak URL aslinya (tanpa perlu kita tebak-tebak lagi)
+    const response = await AxiosService(targetUrl);
+    const $ = cheerio.load(response.data as string);
+
+    let image_list: string[] = [];
+
+    // Mencari gambar di berbagai kemungkinan nama kelas pembaca komik
+    $("#Main_Content img, .mk-reader img, .reader-area img, .main-reading-area img").each((_idx, el) => {
+      let src = $(el).attr("src") ?? $(el).attr("data-src") ?? $(el).attr("data-lazy-src");
+      if (src && src.trim() !== "") {
+        image_list.push(src.trim());
+      }
+    });
+
+    console.log(`[V] Sukses! Menemukan ${image_list.length} panel gambar.`);
+
+    res.status(200).json({
+      status: true,
+      message: "success",
+      image_list,
+    });
+  } catch (error: any) {
+    console.log("[-] Gagal mengambil chapter:", error.message);
+    res.status(500).json({ status: false, message: "Gagal mengambil panel gambar" });
+  }
+});
+
+// Rute untuk Fitur Pencarian (Search) dengan Paginasi
+router.get("/manga/search/:query/:page?", async (req: Request, res: Response) => {
+  const query = req.params.query;
+  // Jika nomor halaman tidak dikirim, anggap saja halaman 1
+  const page = req.params.page || 1;
+
+  // Format URL WP untuk halaman berikutnya
+  let targetUrl = `/?s=${query}`;
+  if (Number(page) > 1) {
+    targetUrl = `/page/${page}/?s=${query}`;
+  }
+
+  try {
+    console.log(`\n[+] Mencari komik "${query}" (Halaman ${page})`);
+    const response = await AxiosService(targetUrl);
+    const $ = cheerio.load(response.data as string);
+
+    let manga_list: any[] = [];
+
+    // JARING PRESISI
+    $("#Search_Results .mk-grid > *").each((_idx, el) => {
+      let title = $(el).find("h1, h2, h3, h4, .title, [class*='title']").text().trim();
+      if (!title || title === "") {
+        title = $(el).find("a").text().trim();
+      }
+
+      let thumb = $(el).find("img").attr("src") ??
+        $(el).find("img").attr("data-src") ??
+        $(el).find("img").attr("data-lazy-src") ?? "";
+
+      let href = $(el).attr("href") ?? $(el).find("a").attr("href");
+
+      if (title && href && title !== "") {
+        let endpoint = href.split("/").filter(Boolean).pop() ?? "";
+
+        manga_list.push({
+          title,
+          thumb,
+          endpoint,
+        });
+      }
+    });
+
+    console.log(`[V] Berhasil menemukan ${manga_list.length} hasil pencarian di halaman ${page}.`);
+
+    res.status(200).json({
+      status: true,
+      message: "success",
+      manga_list,
+    });
+  } catch (error: any) {
+    // Jika situs web aslinya membalas 404 (artinya halamannya sudah habis)
+    if (error.response && error.response.status === 404) {
+      console.log(`[V] Halaman ${page} tidak ditemukan (Data pencarian habis).`);
+      return res.status(200).json({
+        status: true,
+        message: "Data habis",
+        manga_list: [], // Kirim array kosong agar Flutter berhenti nge-scroll
+      });
+    }
+
+    // Jika error karena alasan lain (misal koneksi putus)
+    console.log("[-] Gagal melakukan pencarian:", error.message);
+    res.status(500).json({ status: false, message: "Gagal mencari komik" });
+  }
+});
+
+// Rute untuk Fitur Kategori (Manga, Manhwa, Manhua) dengan Paginasi
+router.get("/manga/type/:type/:page?", async (req: Request, res: Response) => {
+  const type = String(req.params.type || "").toLowerCase(); // manga, manhwa, atau manhua
+  const page = req.params.page || 1;
+
+  // Menggunakan URL penemuanmu: /komik/?tipe=manhwa
+  let targetUrl = `/komik/?orderby=update&tipe=${type}`;
+
+  // Jika meminta halaman 2, 3, dst
+  if (Number(page) > 1) {
+    targetUrl = `/komik/page/${page}/?orderby=update&tipe=${type}`;
+  }
+
+  try {
+    console.log(`\n[+] Mengambil kategori "${type}" (Halaman ${page})`);
+    const response = await AxiosService(targetUrl);
+    const $ = cheerio.load(response.data as string);
+
+    let manga_list: any[] = [];
+
+    // JARING SUPER LEBAR 
+    $(".bs, .listupd .bsx, .utao .uta, .item, .animepost, .bixbox .bsx, .mk-grid > *").each((_idx, el) => {
+
+      let title = $(el).find("h1, h2, h3, h4, .tt, .title, [class*='title']").text().trim();
+      if (!title || title === "") {
+        title = $(el).find("a").text().trim();
+      }
+
+      let thumb = $(el).find("img").attr("src") ??
+        $(el).find("img").attr("data-src") ??
+        $(el).find("img").attr("data-lazy-src") ?? "";
+
+      let href = $(el).attr("href") ?? $(el).find("a").attr("href");
+
+      if (title && href && title !== "") {
+        let endpoint = href.split("/").filter(Boolean).pop() ?? "";
+
+        manga_list.push({
+          title,
+          thumb,
+          endpoint,
+          type: type
+        });
+      }
+    });
+
+    console.log(`[V] Berhasil menemukan ${manga_list.length} komik di kategori ${type}.`);
+
+    res.status(200).json({
+      status: true,
+      message: "success",
+      manga_list,
+    });
+  } catch (error: any) {
+    if (error.response && error.response.status === 404) {
+      console.log(`[V] Halaman ${page} tidak ditemukan (Kategori habis).`);
+      return res.status(200).json({
+        status: true,
+        message: "Data habis",
+        manga_list: [],
+      });
+    }
+    console.log("[-] Gagal mengambil kategori:", error.message);
+    res.status(500).json({ status: false, message: "Gagal memuat kategori" });
+  }
+});
+
+// Rute Sakti untuk Filter, Update Terbaru, dan Jadwal
+router.get("/manga/filter/:page?", async (req: Request, res: Response) => {
+  const page = req.params.page || 1;
+
+  // Menangkap nilai dari query URL (contoh: ?tipe=manhwa&genre=action)
+  const tipe = String(req.query.tipe || "");
+  const genre = String(req.query.genre || "");
+  const status = String(req.query.status || "");
+  const orderby = String(req.query.orderby || "update"); // Default ke update terbaru
+
+  // Merakit URL target ke situs Mangaku
+  let targetUrl = `/komik/?orderby=${orderby}&tipe=${tipe}&genre=${genre}&status=${status}`;
+  if (Number(page) > 1) {
+    targetUrl = `/komik/page/${page}/?orderby=${orderby}&tipe=${tipe}&genre=${genre}&status=${status}`;
+  }
+
+  try {
+    console.log(`\n[+] Filter Halaman ${page} | Order: ${orderby}, Tipe: ${tipe}, Genre: ${genre}, Status: ${status}`);
+    const response = await AxiosService(targetUrl);
+    const $ = cheerio.load(response.data as string);
+
+    let manga_list: any[] = [];
+
+    // Menggunakan jaring yang sudah terbukti ampuh di halaman /komik/
+    // Kita buang tag #Search_Results agar jaringnya bisa menangkap elemen di halaman /komik/
+    $(".bs, .listupd .bsx, .utao .uta, .item, .animepost, .bixbox .bsx, .mk-grid > *").each((_idx, el) => {
+      let title = $(el).find("h1, h2, h3, h4, .tt, .title, [class*='title']").text().trim();
+      if (!title || title === "") title = $(el).find("a").text().trim();
+
+      let thumb = $(el).find("img").attr("src") ??
+        $(el).find("img").attr("data-src") ??
+        $(el).find("img").attr("data-lazy-src") ?? "";
+
+      let href = $(el).attr("href") ?? $(el).find("a").attr("href");
+
+      if (title && href && title !== "") {
+        let endpoint = href.split("/").filter(Boolean).pop() ?? "";
+        manga_list.push({ title, thumb, endpoint });
+      }
+    });
+
+    console.log(`[V] Berhasil menemukan ${manga_list.length} komik dari filter.`);
+
+    res.status(200).json({
+      status: true,
+      message: "success",
+      manga_list,
+    });
+  } catch (error: any) {
+    if (error.response && error.response.status === 404) {
+      return res.status(200).json({ status: true, message: "Data habis", manga_list: [] });
+    }
+    console.log("[-] Gagal mengambil filter:", error.message);
+    res.status(500).json({ status: false, message: "Gagal memuat filter" });
+  }
+});
 
 export default router;
